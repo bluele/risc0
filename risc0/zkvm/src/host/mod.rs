@@ -22,5 +22,5 @@ pub(crate) mod prove_info;
 pub mod recursion;
 #[cfg(feature = "client")]
 pub(crate) mod rpc;
-#[cfg(feature = "prove")]
+#[cfg(feature = "execute")]
 pub(crate) mod server;

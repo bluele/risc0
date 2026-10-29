@@ -140,6 +140,7 @@ impl<Risc0ContextT: Risc0Context> BigIntIO for BigIntIOImpl<'_, Risc0ContextT> {
     }
 }
 
+#[cfg_attr(not(feature = "prove"), allow(dead_code))]
 pub(crate) struct BigIntExec {
     pub(crate) mode: u32,
     pub(crate) verify_program_ptr: WordAddr,
