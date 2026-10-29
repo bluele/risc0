@@ -92,6 +92,16 @@ pub use risc0_zkvm_platform::{align_up, declare_syscall, memory::GUEST_MAX_MEM, 
 pub use bytes::Bytes;
 
 #[cfg(not(target_os = "zkvm"))]
+#[cfg(feature = "execute")]
+pub use self::host::server::{
+    exec::executor::ExecutorImpl,
+    session::{
+        FileSegmentRef, NullSegmentRef, Segment, SegmentRef, Session, SessionEvents,
+        SimpleSegmentRef,
+    },
+};
+
+#[cfg(not(target_os = "zkvm"))]
 #[cfg(feature = "prove")]
 pub use self::host::{
     api::server::Server as ApiServer,
@@ -102,15 +112,11 @@ pub use self::host::{
         RECURSION_PO2,
     },
     server::{
-        exec::executor::ExecutorImpl,
         prove::{
             dev_mode::{DevModeDelay, DevModeProver},
             get_prover_server, HalPair, ProverServer,
         },
-        session::{
-            FileSegmentRef, NullSegmentRef, PreflightResults, Segment, SegmentRef, Session,
-            SessionEvents, SimpleSegmentRef,
-        },
+        session::PreflightResults,
     },
 };
 

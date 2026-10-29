@@ -62,6 +62,6 @@ prove = [
   "risc0-circuit-recursion/prove",
   "std",
 ]
-std = ["risc0-zkp/std", "risc0-binfmt/std"]
+std = ["dep:keccak", "risc0-zkp/std", "risc0-binfmt/std"]
 
 low_vram = []
