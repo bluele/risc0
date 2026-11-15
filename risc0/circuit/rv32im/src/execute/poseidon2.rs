@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use risc0_binfmt::WordAddr;
 use risc0_zkp::{
     core::{
@@ -54,14 +54,19 @@ pub(crate) struct Poseidon2State {
 }
 
 impl Poseidon2State {
-    fn new_ecall(state_addr: u32, buf_in_addr: u32, buf_out_addr: u32, bits_count: u32) -> Self {
+    fn new_ecall(
+        state_addr: WordAddr,
+        buf_in_addr: WordAddr,
+        buf_out_addr: WordAddr,
+        bits_count: u32,
+    ) -> Self {
         let is_elem = bits_count & PFLAG_IS_ELEM;
         let check_out = bits_count & PFLAG_CHECK_OUT;
         Self {
-            state_addr,
-            buf_in_addr,
-            buf_out_addr,
-            has_state: if state_addr == 0 { 0 } else { 1 },
+            state_addr: state_addr.0,
+            buf_in_addr: buf_in_addr.0,
+            buf_out_addr: buf_out_addr.0,
+            has_state: if state_addr.is_null() { 0 } else { 1 },
             is_elem: if is_elem == 0 { 0 } else { 1 },
             check_out: if check_out == 0 { 0 } else { 1 },
             count: bits_count & 0xffff,
@@ -285,11 +290,102 @@ pub(crate) struct Poseidon2;
 impl Poseidon2 {
     pub fn ecall(ctx: &mut impl Risc0Context) -> Result<()> {
         tracing::trace!("ecall");
-        let state_addr = ctx.load_machine_register(LoadOp::Record, REG_A0)?;
-        let buf_in_addr = ctx.load_machine_register(LoadOp::Record, REG_A1)?;
-        let buf_out_addr = ctx.load_machine_register(LoadOp::Record, REG_A2)?;
+        let state_addr = ctx.load_aligned_addr_from_machine_register(LoadOp::Record, REG_A0)?;
+        let buf_in_addr = ctx.load_aligned_addr_from_machine_register(LoadOp::Record, REG_A1)?;
+        let buf_out_addr = ctx.load_aligned_addr_from_machine_register(LoadOp::Record, REG_A2)?;
         let bits_count = ctx.load_machine_register(LoadOp::Record, REG_A3)?;
+        // The circuit admits no a3 with any of bits 16..=29 set, and returns from a call with a
+        // zero count without touching memory, where `rest` would still write the output and the
+        // state.
+        ensure!(
+            bits_count & !(PFLAG_IS_ELEM | PFLAG_CHECK_OUT | 0xffff) == 0,
+            "poseidon2 ecall: reserved bits set in {bits_count:#010x}"
+        );
+        ensure!(bits_count & 0xffff != 0, "poseidon2 ecall: count is zero");
         let mut p2 = Poseidon2State::new_ecall(state_addr, buf_in_addr, buf_out_addr, bits_count);
         p2.rest(ctx, CycleState::Decode)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use risc0_binfmt::ByteAddr;
+
+    use super::*;
+    use crate::execute::r0vm::TestRisc0Context;
+
+    const IN_ADDR: ByteAddr = ByteAddr(0x0010_0000);
+    const OUT_ADDR: ByteAddr = ByteAddr(0x0020_0000);
+
+    /// A context for a call without state over the field elements `0..16` at `IN_ADDR`, with
+    /// the output at `OUT_ADDR`.
+    fn context(bits_count: u32, regs: [u32; 3]) -> TestRisc0Context {
+        let mut ctx = TestRisc0Context::default();
+        for i in 0..16u32 {
+            ctx.store_u32(IN_ADDR.waddr() + i, i).unwrap();
+        }
+        let base = MACHINE_REGS_ADDR.waddr();
+        for (idx, value) in [REG_A0, REG_A1, REG_A2].into_iter().zip(regs) {
+            ctx.store_register(base, idx, value).unwrap();
+        }
+        ctx.store_register(base, REG_A3, bits_count).unwrap();
+        ctx
+    }
+
+    fn default_regs() -> [u32; 3] {
+        [0, IN_ADDR.0, OUT_ADDR.0]
+    }
+
+    #[test]
+    fn takes_byte_addresses() {
+        let mut ctx = context(PFLAG_IS_ELEM | 1, default_regs());
+        Poseidon2::ecall(&mut ctx).unwrap();
+        let out: Vec<u32> = (0..DIGEST_WORDS)
+            .map(|i| ctx.load_u32(LoadOp::Load, OUT_ADDR.waddr() + i).unwrap())
+            .collect();
+        assert_eq!(
+            out,
+            [
+                1749308481, 879447913, 499502012, 1842374203, 1869354733, 71489094, 19273002,
+                690566044,
+            ]
+        );
+    }
+
+    #[test]
+    fn refuses_reserved_bits() {
+        for bit in 16..30 {
+            let mut ctx = context(PFLAG_IS_ELEM | (1 << bit) | 1, default_regs());
+            let err = Poseidon2::ecall(&mut ctx).unwrap_err();
+            assert!(err.to_string().contains("reserved bits"), "{err}");
+            ctx.assert_uninit(OUT_ADDR);
+        }
+    }
+
+    #[test]
+    fn refuses_zero_count() {
+        for flags in [
+            0,
+            PFLAG_IS_ELEM,
+            PFLAG_CHECK_OUT,
+            PFLAG_IS_ELEM | PFLAG_CHECK_OUT,
+        ] {
+            let mut ctx = context(flags, default_regs());
+            let err = Poseidon2::ecall(&mut ctx).unwrap_err();
+            assert!(err.to_string().contains("count is zero"), "{err}");
+            ctx.assert_uninit(OUT_ADDR);
+        }
+    }
+
+    #[test]
+    fn refuses_unaligned_addresses() {
+        for (reg, addr) in [(0, 0x0030_0002), (1, IN_ADDR.0 + 1), (2, OUT_ADDR.0 + 3)] {
+            let mut regs = default_regs();
+            regs[reg] = addr;
+            let mut ctx = context(PFLAG_IS_ELEM | 1, regs);
+            let err = Poseidon2::ecall(&mut ctx).unwrap_err();
+            assert!(err.to_string().contains("unaligned"), "{err}");
+            ctx.assert_uninit(OUT_ADDR);
+        }
     }
 }

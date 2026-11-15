@@ -91,3 +91,22 @@ fn system_split() {
     assert!(segments[0].read_record.is_empty());
     assert!(segments[0].write_record.is_empty());
 }
+
+/// Requires an image to take one segment and to terminate with zeros.
+fn terminates(name: &str, image: MemoryImage) {
+    let session = testutil::run(image).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+    assert_eq!(session.segments.len(), 1, "{name}");
+    assert_eq!(
+        session.segments[0].claim.terminate_state,
+        Some(TerminateState::default()),
+        "{name}"
+    );
+}
+
+#[test]
+fn poseidon2() {
+    for (buf_out, state) in testutil::poseidon2::places() {
+        let program = testutil::poseidon2::calls(buf_out, state);
+        terminates(&format!("{buf_out:#x}"), MemoryImage::new_kernel(program));
+    }
+}

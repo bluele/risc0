@@ -142,3 +142,38 @@ mod riscv {
     test_case!(xor);
     test_case!(xori);
 }
+
+/// Proves a segment, and requires the proof to verify and to be of the claim that the executor
+/// made of the segment.
+pub(crate) fn proves(
+    prover: &dyn super::SegmentProver,
+    segment: &crate::execute::Segment,
+) -> anyhow::Result<()> {
+    use crate::Rv32imV2Claim;
+
+    let seal = prover.prove(segment)?;
+    crate::verify(&seal)?;
+    // The executor does not fill in the shutdown cycle.
+    let claim = Rv32imV2Claim {
+        shutdown_cycle: None,
+        ..Rv32imV2Claim::decode(&seal)?
+    };
+    anyhow::ensure!(claim == segment.claim, "the proof is of {claim:?}");
+    Ok(())
+}
+
+/// [proves] the one segment of an image.
+fn proves_image(name: &str, image: MemoryImage) {
+    let session = testutil::run(image).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+    assert_eq!(session.segments.len(), 1, "{name}");
+    let prover = segment_prover().unwrap();
+    proves(prover.as_ref(), &session.segments[0]).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+}
+
+#[test]
+fn poseidon2() {
+    for (buf_out, state) in testutil::poseidon2::places() {
+        let program = testutil::poseidon2::calls(buf_out, state);
+        proves_image(&format!("{buf_out:#x}"), MemoryImage::new_kernel(program));
+    }
+}

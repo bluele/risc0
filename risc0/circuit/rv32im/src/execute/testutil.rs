@@ -342,3 +342,94 @@ fn insn_u(imm: u32, rd: u32, opcode: u32) -> u32 {
 fn fence() -> u32 {
     insn_i(0, 0, 0, 0, 0b0001111)
 }
+
+/// Runs an image with the limits that the tests of this crate use.
+#[cfg(test)]
+pub(crate) fn run(image: MemoryImage) -> Result<SimpleSession> {
+    execute(
+        image,
+        super::DEFAULT_SEGMENT_LIMIT_PO2,
+        crate::MAX_INSN_CYCLES,
+        DEFAULT_SESSION_LIMIT,
+        &NullSyscall,
+        None,
+    )
+}
+
+/// The word of the register `reg` of the machine.
+#[cfg(test)]
+pub(crate) const fn machine_reg(reg: usize) -> u32 {
+    MACHINE_REGS_ADDR.0 + (reg * WORD_SIZE) as u32
+}
+
+#[cfg(test)]
+impl Assembler {
+    fn host_ecall_poseidon2(
+        &mut self,
+        state_addr: u32,
+        buf_in_addr: u32,
+        buf_out_addr: u32,
+        bits_count: u32,
+    ) {
+        self.li(REG_A7, HOST_ECALL_POSEIDON2);
+        self.li(REG_A0, state_addr);
+        self.li(REG_A1, buf_in_addr);
+        self.li(REG_A2, buf_out_addr);
+        self.li(REG_A3, bits_count);
+        self.ecall();
+    }
+}
+
+/// Kernels that call the poseidon2 ecall with byte addresses, as the circuit reads them.
+#[cfg(test)]
+pub(crate) mod poseidon2 {
+    use super::*;
+
+    /// Where the output and the state of [calls] lie: in user memory, and where else a kernel may
+    /// have them, as its addresses are not held to user memory: registers of the machine, kernel
+    /// memory, and the 64 KiB below user memory.
+    pub(crate) fn places() -> [(u32, u32); 4] {
+        let registers = machine_reg(REG_S2);
+        let kernel = KERNEL_START_ADDR.0 + 0x0010_0000;
+        [
+            (0x0030_0000, 0x0040_0000),
+            (registers, kernel),
+            (kernel, registers),
+            (0x0100, 0x0200),
+        ]
+    }
+
+    /// A kernel with the output of its calls at `buf_out` and its state at `state`, neither of
+    /// them a register that it sets for a call. A call with `PFLAG_CHECK_OUT` fails unless the
+    /// ecall computes the digest at its output address.
+    pub(crate) fn calls(buf_out: u32, state: u32) -> Program {
+        // The digest of the field elements 0..16 without state
+        // (`execute::poseidon2::tests::takes_byte_addresses`).
+        const DIGEST: [u32; 8] = [
+            1749308481, 879447913, 499502012, 1842374203, 1869354733, 71489094, 19273002, 690566044,
+        ];
+        const BUF_IN: u32 = 0x0010_0000;
+        const DIGEST_ADDR: u32 = 0x0020_0000;
+
+        let mut asm = Assembler::new();
+        for i in 0..16 {
+            asm.word(BUF_IN + i * WORD_SIZE as u32, i);
+        }
+        for (i, word) in (0..).zip(DIGEST) {
+            asm.word(DIGEST_ADDR + i * WORD_SIZE as u32, word);
+        }
+        for i in 0..8 {
+            asm.word(state + i * WORD_SIZE as u32, 100 + i);
+        }
+
+        // Check the known digest, then write it and check what was written.
+        asm.host_ecall_poseidon2(0, BUF_IN, DIGEST_ADDR, PFLAG_IS_ELEM | PFLAG_CHECK_OUT | 1);
+        asm.host_ecall_poseidon2(0, BUF_IN, buf_out, PFLAG_IS_ELEM | 1);
+        asm.host_ecall_poseidon2(0, BUF_IN, buf_out, PFLAG_IS_ELEM | PFLAG_CHECK_OUT | 1);
+        // Absorb two blocks of bytes into the state in memory.
+        asm.host_ecall_poseidon2(state, BUF_IN, buf_out, 2);
+        asm.host_terminate(0, 0);
+
+        asm.program()
+    }
+}
