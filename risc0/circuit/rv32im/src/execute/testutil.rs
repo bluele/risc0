@@ -370,6 +370,11 @@ impl Assembler {
         USER_START_ADDR.0 + ((1 + self.text.len()) * WORD_SIZE) as u32
     }
 
+    /// One word of the program as it is.
+    fn raw(&mut self, word: u32) {
+        self.text.push(word);
+    }
+
     /// [Self::li] in two instructions whatever the value, neither of which reads the register
     /// zero.
     fn li2(&mut self, rd: usize, imm: u32) {
@@ -377,6 +382,16 @@ impl Assembler {
         let high = (imm.wrapping_sub(low as u32)) >> 12;
         self.lui(rd, high);
         self.addi(rd, rd, low as u32 & 0xfff);
+    }
+
+    fn load(&mut self, funct3: u32, rd: usize, rs1: usize, imm: u32) {
+        self.text
+            .push(insn_i(imm, rs1 as u32, funct3, rd as u32, OP_LOAD));
+    }
+
+    fn store(&mut self, funct3: u32, rs2: usize, rs1: usize, imm: u32) {
+        self.text
+            .push(insn_s(imm, rs2 as u32, rs1 as u32, funct3, OP_STORE));
     }
 
     fn jalr(&mut self, rd: usize, rs1: usize, imm: u32) {
@@ -398,6 +413,18 @@ impl Assembler {
         self.li(REG_A3, bits_count);
         self.ecall();
     }
+}
+
+// 31        25 | 24  20 | 19  15 | 14  12 | 11        7 | 6    0 |
+//   imm[11:5]  |   rs2  |   rs1  | funct3 |  imm[4:0]   | opcode |
+#[cfg(test)]
+fn insn_s(imm: u32, rs2: u32, rs1: u32, funct3: u32, opcode: u32) -> u32 {
+    (((imm >> 5) & 0x7f) << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (funct3 << 12)
+        | ((imm & 0x1f) << 7)
+        | opcode
 }
 
 /// A kernel that jumps with `jalr` to the instruction after it, with `low` added to the address
@@ -464,6 +491,266 @@ pub(crate) mod poseidon2 {
         asm.host_terminate(0, 0);
 
         asm.program()
+    }
+}
+
+/// Programs whose instructions reach the words that their own cycles read, the instruction itself
+/// and the registers of the machine, and user programs under a kernel that enters them.
+#[cfg(test)]
+pub(crate) mod access {
+    use super::*;
+
+    pub(crate) const BYTE: u32 = FUNCT3_BYTE;
+    pub(crate) const HALF: u32 = FUNCT3_HALF;
+    pub(crate) const WORD: u32 = FUNCT3_WORD;
+    pub(crate) const BYTEU: u32 = FUNCT3_BYTEU;
+    pub(crate) const HALFU: u32 = FUNCT3_HALFU;
+
+    const NOP: u32 = 0x0000_0013;
+
+    /// Loads with the instruction of `funct3` what lies `offset` bytes from the load itself:
+    /// the nop before it (-4 to -1), the load (0 to 3) or the nop after it (4 to 7).
+    pub(crate) fn loads_near_itself(funct3: u32, offset: i32) -> Program {
+        let mut asm = Assembler::new();
+        let load = asm.here() + (3 * WORD_SIZE) as u32;
+        asm.li2(REG_T0, load.wrapping_add_signed(offset));
+        asm.raw(NOP);
+        asm.load(funct3, REG_A0, REG_T0, 0);
+        asm.raw(NOP);
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// Stores with the instruction of `funct3` to what lies `offset` bytes from the store itself:
+    /// the nop before it (-4 to -1), the store (0 to 3) or the nop after it (4 to 7). It stores
+    /// the bytes that are there, so that the program stays as it is.
+    pub(crate) fn stores_near_itself(funct3: u32, offset: i32) -> Program {
+        let mut asm = Assembler::new();
+        let store = asm.here() + (5 * WORD_SIZE) as u32;
+        let target = store.wrapping_add_signed(offset);
+        let insn = insn_s(0, REG_T1 as u32, REG_T0 as u32, funct3, OP_STORE);
+        let there = if target & !3 == store { insn } else { NOP };
+        asm.li2(REG_T0, target);
+        asm.li2(REG_T1, there >> (8 * (target & 3)));
+        asm.raw(NOP);
+        asm.raw(insn);
+        asm.raw(NOP);
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// The machine loads the word of its register `reg`, whose address `t0` holds.
+    pub(crate) fn loads_register(reg: usize) -> Program {
+        let mut asm = Assembler::new();
+        asm.li2(REG_T0, machine_reg(reg));
+        asm.load(WORD, REG_A0, REG_T0, 0);
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// The machine stores `t1` to the word of its register `reg`, whose address `t0` holds.
+    pub(crate) fn stores_register(reg: usize) -> Program {
+        let mut asm = Assembler::new();
+        asm.li2(REG_T0, machine_reg(reg));
+        asm.li2(REG_T1, 7);
+        asm.store(WORD, REG_T1, REG_T0, 0);
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// The machine runs two instructions out of registers: one that adds zero to its register
+    /// `reg`, and a return. They are in `t1` and `t2` of the machine, or of the user file if
+    /// `user` is set.
+    pub(crate) fn runs_registers(user: bool, reg: usize) -> Program {
+        let base = if user {
+            USER_REGS_ADDR
+        } else {
+            MACHINE_REGS_ADDR
+        };
+        let at = |reg: usize| base.0 + (reg * WORD_SIZE) as u32;
+        let add = insn_i(0, reg as u32, 0, reg as u32, OP_IMM);
+        let ret = insn_i(0, REG_RA as u32, 0, REG_ZERO as u32, OP_JALR);
+
+        let mut asm = Assembler::new();
+        if user {
+            // The machine writes the two instructions to the registers of the user.
+            asm.li2(REG_T0, at(REG_T1));
+            asm.li2(REG_T4, add);
+            asm.store(WORD, REG_T4, REG_T0, 0);
+            asm.li2(REG_T4, ret);
+            asm.store(WORD, REG_T4, REG_T0, WORD_SIZE as u32);
+        } else {
+            asm.li2(REG_T1, add);
+            asm.li2(REG_T2, ret);
+        }
+        asm.li2(REG_T0, at(REG_T1));
+        asm.jalr(REG_RA, REG_T0, 0);
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// The image of a user program and of a kernel that enters it. The kernel lies at the start
+    /// of kernel memory, and terminates when the user program makes an ecall.
+    pub(crate) fn user(program: Program) -> MemoryImage {
+        user_with(program, false, 0)
+    }
+
+    /// [user] with a kernel that enters the program `skew` bytes past its entry, and that names
+    /// its end as the handler of every trap if `handles` is set.
+    pub(crate) fn user_with(program: Program, handles: bool, skew: u32) -> MemoryImage {
+        under(program, kernel_words(handles, skew))
+    }
+
+    /// The image of a user program and of a kernel of these words.
+    pub(crate) fn under(program: Program, kernel: BTreeMap<u32, u32>) -> MemoryImage {
+        let kernel = Program::new_from_entry_and_image(KERNEL_START_ADDR.0, kernel);
+        MemoryImage::with_kernel(program, kernel)
+    }
+
+    /// The words of the kernel of [user_with].
+    pub(crate) fn kernel_words(handles: bool, skew: u32) -> BTreeMap<u32, u32> {
+        let mut kernel = Assembler::new();
+        kernel.li2(REG_T0, MEPC_ADDR.0);
+        // An mret goes on at the word after the address that it finds, and the programs of
+        // these tests begin at the second word of user memory.
+        kernel.li2(REG_T1, USER_START_ADDR.0 + skew);
+        kernel.store(WORD, REG_T1, REG_T0, 0);
+        kernel.raw(0x3020_0073); // mret
+        let handler = KERNEL_START_ADDR.0 + (kernel.text.len() * WORD_SIZE) as u32;
+        kernel.host_terminate(0, 0);
+
+        let mut image: BTreeMap<u32, u32> = (0u32..)
+            .zip(&kernel.text)
+            .map(|(i, insn)| (KERNEL_START_ADDR.0 + i * WORD_SIZE as u32, *insn))
+            .collect();
+        image.insert(ECALL_DISPATCH_ADDR.0, handler);
+        if handles {
+            // The causes of `Exception` are numbered from 0 to 9, the last that of an ecall
+            // without a handler.
+            for cause in 0..10 {
+                image.insert(TRAP_DISPATCH_ADDR.0 + cause * WORD_SIZE as u32, handler);
+            }
+        }
+        image
+    }
+
+    /// Programs that the circuit proves: each instruction reads the words of its cycle once.
+    pub(crate) fn accepted() -> Vec<(&'static str, MemoryImage)> {
+        let kernel = MemoryImage::new_kernel;
+        vec![
+            (
+                "loads the word before it",
+                kernel(loads_near_itself(WORD, -4)),
+            ),
+            (
+                "loads the word after it",
+                kernel(loads_near_itself(WORD, 4)),
+            ),
+            (
+                "loads the byte before it",
+                kernel(loads_near_itself(BYTE, -1)),
+            ),
+            (
+                "loads the byte after it",
+                kernel(loads_near_itself(BYTEU, 4)),
+            ),
+            (
+                "stores to the word before it",
+                kernel(stores_near_itself(WORD, -4)),
+            ),
+            (
+                "stores to the word after it",
+                kernel(stores_near_itself(WORD, 4)),
+            ),
+            (
+                "stores to the byte after it",
+                kernel(stores_near_itself(BYTE, 4)),
+            ),
+            (
+                "a user program loads the word before it",
+                user(loads_near_itself(WORD, -4)),
+            ),
+            (
+                "a user program loads the word after it",
+                user(loads_near_itself(WORD, 4)),
+            ),
+            (
+                "a user program stores to the word after it",
+                user(stores_near_itself(WORD, 4)),
+            ),
+            // The load names `t0`, and the store `t0` and `t1`.
+            ("loads another register", kernel(loads_register(REG_T1))),
+            (
+                "stores to another register",
+                kernel(stores_register(REG_T2)),
+            ),
+            // The instruction in the register `t1` names `t3`.
+            (
+                "runs registers that name others",
+                kernel(runs_registers(false, REG_T3)),
+            ),
+            (
+                "runs registers of the user",
+                kernel(runs_registers(true, REG_T1)),
+            ),
+        ]
+    }
+
+    /// Programs that the executor refuses, as the circuit does: an instruction would read a
+    /// word of its cycle twice.
+    pub(crate) fn refused() -> Vec<(&'static str, MemoryImage)> {
+        let kernel = MemoryImage::new_kernel;
+        vec![
+            ("loads its own word", kernel(loads_near_itself(WORD, 0))),
+            ("loads its first byte", kernel(loads_near_itself(BYTE, 0))),
+            ("loads its last byte", kernel(loads_near_itself(BYTEU, 3))),
+            ("loads its second half", kernel(loads_near_itself(HALF, 2))),
+            ("loads its first half", kernel(loads_near_itself(HALFU, 0))),
+            (
+                "stores to its own word",
+                kernel(stores_near_itself(WORD, 0)),
+            ),
+            (
+                "stores to a byte of itself",
+                kernel(stores_near_itself(BYTE, 2)),
+            ),
+            (
+                "stores to a half of itself",
+                kernel(stores_near_itself(HALF, 0)),
+            ),
+            (
+                "a user program loads its own word",
+                user(loads_near_itself(WORD, 0)),
+            ),
+            (
+                "a user program loads a byte of itself",
+                user(loads_near_itself(BYTEU, 1)),
+            ),
+            (
+                "a user program stores to its own word",
+                user(stores_near_itself(WORD, 0)),
+            ),
+            (
+                "a user program stores to a byte of itself",
+                user(stores_near_itself(BYTE, 3)),
+            ),
+            (
+                "loads the register of its address",
+                kernel(loads_register(REG_T0)),
+            ),
+            (
+                "stores to the register of its address",
+                kernel(stores_register(REG_T0)),
+            ),
+            (
+                "stores to the register that it stores",
+                kernel(stores_register(REG_T1)),
+            ),
+            (
+                "runs a register that names itself",
+                kernel(runs_registers(false, REG_T1)),
+            ),
+        ]
     }
 }
 
@@ -589,6 +876,14 @@ pub(crate) mod sha2 {
                     ..call
                 },
             ),
+            // A cycle reads a round constant and a word of a block.
+            (
+                "the blocks begin a word past the round constants",
+                Call {
+                    data: K + WORD_SIZE as u32,
+                    ..call
+                },
+            ),
             // A kernel makes the call, and its addresses are not held to user memory.
             (
                 "the state goes to kernel memory",
@@ -625,6 +920,7 @@ pub(crate) mod sha2 {
     /// Calls that the executor refuses, and what it says of each.
     pub(crate) fn refused() -> Vec<(&'static str, Call, &'static str)> {
         const UNALIGNED: &str = "is an unaligned address";
+        const TWICE: &str = "sha2 ecall reads a word twice";
         let call = Call::default();
         vec![
             (
@@ -655,6 +951,20 @@ pub(crate) mod sha2 {
                 "the round constants are not word aligned",
                 Call { k: K + 1, ..call },
                 UNALIGNED,
+            ),
+            (
+                "the first block is the round constants",
+                Call { data: K, ..call },
+                TWICE,
+            ),
+            (
+                "the second block is the round constants",
+                Call {
+                    data: K - (BLOCK_WORDS * WORD_SIZE) as u32,
+                    count: 2,
+                    ..call
+                },
+                TWICE,
             ),
             // Memory has no word past its end, which upstream refuses too.
             (

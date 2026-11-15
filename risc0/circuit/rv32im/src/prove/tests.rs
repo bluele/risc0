@@ -191,3 +191,10 @@ fn sha2() {
         proves_image(name, MemoryImage::new_kernel(call.program()));
     }
 }
+
+#[test]
+fn reads_a_word_once() {
+    for (name, image) in testutil::access::accepted() {
+        proves_image(name, image);
+    }
+}

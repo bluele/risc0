@@ -772,6 +772,10 @@ impl<T: Risc0Context> EmuContext for Risc0Machine<'_, T> {
         }
     }
 
+    fn register_addr(&self, idx: usize) -> WordAddr {
+        self.regs_base_addr() + idx
+    }
+
     #[inline(always)]
     fn load_memory(&mut self, addr: WordAddr) -> Result<u32> {
         self.ctx.load_u32(LoadOp::Record, addr)

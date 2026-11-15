@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use derive_more::Debug;
 use risc0_binfmt::{ByteAddr, WordAddr};
 
-use super::platform::{REG_MAX, REG_ZERO, WORD_SIZE};
+use super::{
+    platform::{MACHINE_REGS_ADDR, REG_MAX, REG_ZERO, WORD_SIZE},
+    unlikely,
+};
 
 pub trait EmuContext {
     // Handle environment call
@@ -45,6 +48,9 @@ pub trait EmuContext {
 
     // Store to a register
     fn store_register(&mut self, idx: usize, word: u32) -> Result<()>;
+
+    // The word of a register in the file that the instructions read now
+    fn register_addr(&self, idx: usize) -> WordAddr;
 
     // Load from memory
     fn load_memory(&mut self, addr: WordAddr) -> Result<u32>;
@@ -311,6 +317,54 @@ impl Emulator {
         Ok(())
     }
 
+    /// Refuses an instruction whose cycle would read a word twice.
+    ///
+    /// The circuit reads the instruction, its source registers and the word of a load or of a
+    /// store in one cycle, and its memory argument takes one read of a word in a cycle
+    /// (`IsForward`). The emulator reads them one after the other and would go on.
+    ///
+    /// The registers are words of memory at and above `MACHINE_REGS_ADDR`. This runs for every
+    /// instruction, so it looks at the two addresses only and leaves the words to
+    /// [Self::reads_twice]: whatever may involve a register goes there, as `pc | addr` is at
+    /// least either address, and so does a load or a store in the word of its instruction.
+    #[inline(always)]
+    fn read_once<M: EmuContext>(
+        ctx: &M,
+        pc: ByteAddr,
+        regs: [u32; 2],
+        data: Option<ByteAddr>,
+    ) -> Result<()> {
+        let near = match data {
+            Some(addr) => {
+                (pc.0 | addr.0) >= MACHINE_REGS_ADDR.0 || (pc.0 ^ addr.0) < WORD_SIZE as u32
+            }
+            None => pc >= MACHINE_REGS_ADDR,
+        };
+        if unlikely(near) {
+            return Self::reads_twice(ctx, pc.waddr(), regs, data.map(|addr| addr.waddr()));
+        }
+        Ok(())
+    }
+
+    /// Compares the words that a cycle reads: the instruction at `pc`, the registers `regs`
+    /// and the word `data` of a load or of a store.
+    #[cold]
+    #[inline(never)]
+    fn reads_twice<M: EmuContext>(
+        ctx: &M,
+        pc: WordAddr,
+        regs: [u32; 2],
+        data: Option<WordAddr>,
+    ) -> Result<()> {
+        const TWICE: &str = "instruction reads a word twice";
+        ensure!(data != Some(pc), TWICE);
+        for reg in regs {
+            let reg = ctx.register_addr(reg as usize);
+            ensure!(reg != pc && Some(reg) != data, TWICE);
+        }
+        Ok(())
+    }
+
     fn load_rs2<M: EmuContext>(
         &self,
         ctx: &mut M,
@@ -334,6 +388,7 @@ impl Emulator {
         self.trace_instruction(ctx, kind, &decoded)?;
 
         let pc = ctx.get_pc();
+        Self::read_once(ctx, pc, [decoded.rs1, decoded.rs2], None)?;
         let mut new_pc = pc + WORD_SIZE;
         let mut rd = decoded.rd;
         let rs1 = ctx.load_register(decoded.rs1 as usize)?;
@@ -468,6 +523,7 @@ impl Emulator {
         if !ctx.check_data_load(addr) {
             return Ok(ctx.trap(Exception::LoadAccessFault(addr))?.then_some(kind));
         }
+        Self::read_once(ctx, ctx.get_pc(), [decoded.rs1; 2], Some(addr))?;
         let data = ctx.load_memory(addr.waddr())?;
         let shift = 8 * (addr.0 & 3);
         let out = match kind {
@@ -524,6 +580,8 @@ impl Emulator {
         if !ctx.check_data_store(addr) {
             return Ok(ctx.trap(Exception::StoreAccessFault)?.then_some(kind));
         }
+        // A store reads the word that it stores to before it writes it.
+        Self::read_once(ctx, ctx.get_pc(), [decoded.rs1, decoded.rs2], Some(addr))?;
         let mut data = ctx.load_memory(addr.waddr())?;
         match kind {
             InsnKind::Sb => {

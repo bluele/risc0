@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use risc0_binfmt::WordAddr;
 use risc0_zkp::core::hash::sha::BLOCK_WORDS;
 
@@ -111,6 +111,12 @@ pub fn ecall(ctx: &mut impl Risc0Context) -> Result<()> {
         for i in 0..SHA2_LOAD_DATA_CYCLES {
             sha2.round = i;
             sha2.step(ctx, &mut cur_state, CycleState::ShaLoadData);
+            // The circuit reads the round constant and the word of the block in one cycle, and
+            // its memory argument takes one read of a word in a cycle.
+            ensure!(
+                sha2.k_addr + i != sha2.data_addr,
+                "sha2 ecall reads a word twice"
+            );
             let k = ctx.load_u32(LoadOp::Record, sha2.k_addr + i)?;
             sha2.w = ctx.load_u32(LoadOp::Record, sha2.data_addr)?.to_be();
             sha2.data_addr += 1u32;

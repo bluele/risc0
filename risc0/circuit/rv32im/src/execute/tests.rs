@@ -152,3 +152,15 @@ fn sha2() {
         refuses(name, MemoryImage::new_kernel(call.program()), message);
     }
 }
+
+/// The circuit takes one read of a word in a cycle, and the cycle of an instruction reads the
+/// instruction, its source registers and the word of a load or of a store.
+#[test]
+fn reads_a_word_once() {
+    for (name, image) in testutil::access::accepted() {
+        terminates(name, image);
+    }
+    for (name, image) in testutil::access::refused() {
+        refuses(name, image, "instruction reads a word twice");
+    }
+}
