@@ -130,6 +130,17 @@ impl Segment {
         self.inner.po2 as usize
     }
 
+    /// The output digest the guest wrote when it terminated (`GLOBAL_OUTPUT_ADDR`): the value
+    /// the rv32im circuit proves for the final [Segment]. `None` before the guest terminates.
+    ///
+    /// The [Session] claim is built from the executor's record of journal writes and
+    /// assumptions instead. The prover checks the two against each other when it verifies the
+    /// final segment; an executor-only verifier can use this value to make the same check.
+    pub fn committed_output(&self) -> Option<Digest> {
+        self.inner.claim.output
+    }
+
+    #[cfg(feature = "prove")]
     pub(crate) fn user_cycles(&self) -> u32 {
         self.inner.suspend_cycle
     }
