@@ -13,17 +13,16 @@
 // limitations under the License.
 
 pub mod analyze;
+pub(crate) mod verify;
 
-use std::{
-    collections::BTreeMap,
-    io::{Cursor, Read},
-};
+use std::{collections::BTreeMap, io::Cursor};
 
 use anyhow::{ensure, Result};
 use malachite::Natural;
 use risc0_binfmt::WordAddr;
 use smallvec::SmallVec;
 
+pub(crate) use self::verify::BigIntState;
 use super::{
     bibc::{self, BigIntIO},
     platform::*,
@@ -140,37 +139,19 @@ impl<Risc0ContextT: Risc0Context> BigIntIO for BigIntIOImpl<'_, Risc0ContextT> {
     }
 }
 
-#[cfg_attr(not(feature = "prove"), allow(dead_code))]
 pub(crate) struct BigIntExec {
     pub(crate) mode: u32,
+    /// The word before the first instruction of the verify program.
     pub(crate) verify_program_ptr: WordAddr,
     pub(crate) verify_program_size: usize,
     pub(crate) witness: BigIntWitness,
 }
 
-fn write_witness_to_memory(witness: BigIntWitness, ctx: &mut impl Risc0Context) -> Result<()> {
-    for (addr, bytes) in witness {
-        for (i, chunk) in bytes.chunks_exact(WORD_SIZE).enumerate() {
-            let word = u32::from_le_bytes(chunk.try_into().unwrap());
-            ctx.store_u32(addr + i, word)?;
-        }
-    }
-    Ok(())
-}
-
-pub fn ecall_execute(ctx: &mut impl Risc0Context) -> Result<usize> {
+/// Runs a bigint ecall: the host program computes a witness, and the verify program checks it and
+/// writes of it what it names, one cycle for each of its instructions.
+pub fn ecall_execute(ctx: &mut impl Risc0Context) -> Result<()> {
     let exec = ecall(ctx)?;
-    let cycles = exec.verify_program_size + 1;
-    write_witness_to_memory(exec.witness, ctx)?;
-
-    Ok(cycles)
-}
-
-// A thin function to drain a reader. Optimizes well with inlining.
-fn drain(mut reader: impl Read) -> std::io::Result<()> {
-    let mut buf = [0u8; 8 << 10];
-    while reader.read(&mut buf)? > 0 {}
-    Ok(())
+    verify::run(ctx, &exec)
 }
 
 pub(crate) fn ecall(ctx: &mut impl Risc0Context) -> Result<BigIntExec> {
@@ -183,13 +164,16 @@ pub(crate) fn ecall(ctx: &mut impl Risc0Context) -> Result<BigIntExec> {
     );
     let blob_ptr = ctx.load_aligned_addr_from_machine_register(LoadOp::Load, REG_A0)?;
     let nondet_program_ptr = ctx.load_aligned_addr_from_machine_register(LoadOp::Load, REG_T1)?;
-    let verify_program_ptr =
-        ctx.load_aligned_addr_from_machine_register(LoadOp::Record, REG_T2)? - 1;
-    let consts_ptr = ctx.load_aligned_addr_from_machine_register(LoadOp::Load, REG_T3)?;
+    let verify_program_addr =
+        ctx.load_aligned_addr_from_machine_register(LoadOp::Record, REG_T2)?;
+    ensure!(
+        !verify_program_addr.is_null(),
+        "Invalid bigint verify program address"
+    );
+    let verify_program_ptr = verify_program_addr - 1;
 
     let nondet_program_size = ctx.load_u32(LoadOp::Load, blob_ptr)?;
     let verify_program_size = ctx.load_u32(LoadOp::Load, blob_ptr + 1)? as usize;
-    let consts_size = ctx.load_u32(LoadOp::Load, blob_ptr + 2)?;
     tracing::debug!("blob_ptr: {blob_ptr:?}");
     tracing::debug!(
         "nondet_program_ptr: {nondet_program_ptr:?}, nondet_program_size: {nondet_program_size}"
@@ -215,19 +199,6 @@ pub(crate) fn ecall(ctx: &mut impl Risc0Context) -> Result<BigIntExec> {
         std::mem::take(&mut io.witness)
     };
 
-    // Read the verify program and the witness so that they are paged-in, and the cycles for
-    // loading them are recorded.
-    drain(ctx.read_region(
-        LoadOp::Load,
-        verify_program_ptr.baddr(),
-        verify_program_size * WORD_SIZE,
-    )?)?;
-    drain(ctx.read_region(
-        LoadOp::Load,
-        consts_ptr.baddr(),
-        consts_size as usize * WORD_SIZE,
-    )?)?;
-
     Ok(BigIntExec {
         mode,
         verify_program_ptr,
@@ -248,6 +219,16 @@ mod tests {
     const ARENA_REG: usize = REG_A0;
     /// Default arena base address used in the tests below.
     const DEFAULT_BASE_ADDR: ByteAddr = ByteAddr(ZERO_PAGE_END_ADDR.0 + 0x1234);
+
+    fn write_witness_to_memory(witness: BigIntWitness, ctx: &mut impl Risc0Context) -> Result<()> {
+        for (addr, bytes) in witness {
+            for (i, chunk) in bytes.chunks_exact(WORD_SIZE).enumerate() {
+                let word = u32::from_le_bytes(chunk.try_into().unwrap());
+                ctx.store_u32(addr + i, word)?;
+            }
+        }
+        Ok(())
+    }
 
     fn bigint_write_to(
         base_addr: ByteAddr,

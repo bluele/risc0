@@ -35,15 +35,14 @@ use risc0_zkp::{
 };
 
 use self::{
-    bigint::BigIntState,
     byte_poly::{BigIntAccum, BigIntAccumState},
     preflight::Back,
 };
 use super::hal::{CircuitAccumulator, CircuitWitnessGenerator, MetaBuffer, StepMode};
 use crate::{
     execute::{
-        platform::MERKLE_TREE_END_ADDR, poseidon2::Poseidon2State, segment::Segment,
-        sha2::Sha2State,
+        bigint::BigIntState, platform::MERKLE_TREE_END_ADDR, poseidon2::Poseidon2State,
+        segment::Segment, sha2::Sha2State,
     },
     zirgen::circuit::{
         CircuitField, ExtVal, Val, LAYOUT_GLOBAL, LAYOUT_TOP, REGCOUNT_ACCUM, REGCOUNT_CODE,

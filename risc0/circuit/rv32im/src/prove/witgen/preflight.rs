@@ -24,7 +24,7 @@ use risc0_zkp::core::digest::DIGEST_WORDS;
 
 use crate::{
     execute::{
-        bigint::BigIntBytes,
+        bigint::{self, BigIntBytes, BigIntState},
         node_idx,
         pager::{page_idx, PageState, PagedMemory},
         platform::*,
@@ -37,10 +37,7 @@ use crate::{
     zirgen::circuit::ExtVal,
 };
 
-use super::{
-    bigint::BigIntState, node_addr_to_idx, node_idx_to_addr, paged_map::PagedMap,
-    poseidon2::Checksum,
-};
+use super::{node_addr_to_idx, node_idx_to_addr, paged_map::PagedMap, poseidon2::Checksum};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) enum Back {
@@ -456,18 +453,6 @@ impl<'a> Preflight<'a> {
         // tracing::trace!("add_cycle_special(cur_state: {cur_state:?}, next_state: {next_state:?}, major: {major}, minor: {minor})");
         self.add_cycle(next_state, pc, major, minor, paging_idx, back);
     }
-
-    pub(crate) fn on_bigint_cycle(&mut self, cur_state: CycleState, bigint: &BigIntState) {
-        self.add_witness(&bigint.bytes);
-        self.add_cycle_special(
-            cur_state,
-            bigint.next_state,
-            self.pc.0,
-            0, //paging_idx
-            Back::BigInt(bigint.clone()),
-        );
-        self.user_cycles += 1;
-    }
 }
 
 impl Risc0Context for Preflight<'_> {
@@ -685,8 +670,20 @@ impl Risc0Context for Preflight<'_> {
         self.user_cycles += 1;
     }
 
+    fn on_bigint_cycle(&mut self, cur_state: CycleState, bigint: &BigIntState) {
+        self.add_witness(&bigint.bytes);
+        self.add_cycle_special(
+            cur_state,
+            bigint.next_state,
+            self.pc.0,
+            0, //paging_idx
+            Back::BigInt(bigint.clone()),
+        );
+        self.user_cycles += 1;
+    }
+
     fn ecall_bigint(&mut self) -> Result<()> {
-        super::bigint::ecall_preflight(self)
+        bigint::ecall_execute(self)
     }
 }
 

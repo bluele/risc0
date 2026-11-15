@@ -103,10 +103,29 @@ fn terminates(name: &str, image: MemoryImage) {
     );
 }
 
+/// Requires the executor to refuse an image, and to say `message` of it.
+fn refuses(name: &str, image: MemoryImage, message: &str) {
+    match testutil::run(image) {
+        Ok(_) => panic!("{name}: the executor accepted the program"),
+        Err(error) => assert!(format!("{error:#}").contains(message), "{name}: {error:#}"),
+    }
+}
+
 #[test]
 fn poseidon2() {
     for (buf_out, state) in testutil::poseidon2::places() {
         let program = testutil::poseidon2::calls(buf_out, state);
         terminates(&format!("{buf_out:#x}"), MemoryImage::new_kernel(program));
+    }
+}
+
+/// Each kernel checks the memory that its call leaves before it terminates.
+#[test]
+fn bigint() {
+    for (name, call) in testutil::bigint::accepted() {
+        terminates(name, MemoryImage::new_kernel(call.program()));
+    }
+    for (name, call, message) in testutil::bigint::refused() {
+        refuses(name, MemoryImage::new_kernel(call.program()), message);
     }
 }

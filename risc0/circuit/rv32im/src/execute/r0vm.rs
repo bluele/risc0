@@ -19,6 +19,7 @@ use enum_map::Enum;
 use risc0_binfmt::{ByteAddr, WordAddr};
 
 use super::{
+    bigint::BigIntState,
     platform::*,
     poseidon2::{Poseidon2, Poseidon2State},
     rv32im::{EmuContext, Emulator, Exception, InsnKind},
@@ -235,6 +236,8 @@ pub(crate) trait Risc0Context {
 
     fn on_poseidon2_cycle(&mut self, cur_state: CycleState, p2: &Poseidon2State);
 
+    fn on_bigint_cycle(&mut self, cur_state: CycleState, bigint: &BigIntState);
+
     fn ecall_bigint(&mut self) -> Result<()>;
 }
 
@@ -244,6 +247,8 @@ pub struct TestRisc0Context {
     user_pc: ByteAddr,
     machine_mode: u32,
     memory: std::collections::BTreeMap<WordAddr, u32>,
+    /// The cycles of the bigint ecalls so far.
+    pub bigint_cycles: usize,
 }
 
 #[cfg(test)]
@@ -254,6 +259,7 @@ impl Default for TestRisc0Context {
             user_pc: ByteAddr(0),
             machine_mode: 0,
             memory: Default::default(),
+            bigint_cycles: 0,
         }
     }
 }
@@ -355,6 +361,10 @@ impl Risc0Context for TestRisc0Context {
         _cur_state: CycleState,
         _p2: &super::poseidon2::Poseidon2State,
     ) {
+    }
+
+    fn on_bigint_cycle(&mut self, _cur_state: CycleState, _bigint: &BigIntState) {
+        self.bigint_cycles += 1;
     }
 
     fn ecall_bigint(&mut self) -> Result<()> {

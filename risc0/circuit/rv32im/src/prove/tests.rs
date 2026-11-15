@@ -177,3 +177,10 @@ fn poseidon2() {
         proves_image(&format!("{buf_out:#x}"), MemoryImage::new_kernel(program));
     }
 }
+
+#[test]
+fn bigint() {
+    for (name, call) in testutil::bigint::accepted() {
+        proves_image(name, MemoryImage::new_kernel(call.program()));
+    }
+}
