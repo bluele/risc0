@@ -4,6 +4,8 @@ on:
   merge_group:
   pull_request:
     branches: [main, "release-*"]
+  push:
+    branches: ["bluele/**"]
   workflow_dispatch:
 
 concurrency:
@@ -53,8 +55,11 @@ jobs:
   main-status-check:
     if: always()
     needs:
+      - changes
       - check
       - clippy
+      - test
+      - guest-abi
     runs-on: ubuntu-latest
     steps:
       - name: Check all job status
@@ -110,7 +115,40 @@ jobs:
       - uses: ./.github/actions/rustup
       - name: "root: cargo clippy"
         run: cargo clippy -F unstable --all-targets
-      - name: "examples: cargo clippy"
-        run: cargo clippy --all-targets
-        working-directory: examples
+      # Not the examples: cargo cannot fetch the git dependency of `examples/smartcore-ml`, a
+      # repository that GitHub answers 404 for.
+
+  test:
+    if: needs.changes.outputs.risc0 == 'true'
+    needs: changes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk
+      - uses: ./.github/actions/rustup
+      # The executor alone, with the features of executor-only builds.
+      - name: "rv32im: cargo test, execute"
+        run: cargo test -p risc0-circuit-rv32im --features execute --lib
+      # The executor against the circuit: the CPU prover proves each test program.
+      - name: "rv32im: cargo test, prove"
+        run: cargo test -p risc0-circuit-rv32im --features prove --lib
+
+  guest-abi:
+    if: needs.changes.outputs.risc0 == 'true'
+    needs: changes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk
+      - uses: ./.github/actions/rustup
+      # The test Guests need RISC Zero's Rust and C++ toolchains.
+      - name: Install the RISC Zero toolchains
+        run: |
+          cargo install rzup --version 0.5.2 --locked --no-default-features --features cli,install
+          rzup install rust 1.97.0
+          rzup install cpp 2024.1.5
+      # The Guest ABI against the executor: multi_test's poseidon2 cases call sys_poseidon2 and
+      # check each digest in the Guest. The features are those of executor-only builds.
+      - name: "risc0-zkvm: multi_test poseidon2, execute"
+        run: cargo test -p risc0-zkvm --no-default-features --features execute --lib -- poseidon2
 
