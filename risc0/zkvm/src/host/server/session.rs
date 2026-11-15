@@ -21,7 +21,7 @@ use anyhow::{ensure, Context, Result};
 use enum_map::EnumMap;
 use risc0_binfmt::{PovwJobId, SystemState};
 use risc0_circuit_keccak::{compute_keccak_digest, KECCAK_CONTROL_ROOT};
-use risc0_circuit_rv32im::{execute::EcallMetric, TerminateState};
+use risc0_circuit_rv32im::execute::EcallMetric;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -147,14 +147,16 @@ impl Segment {
 }
 
 /// The results of running preflight on a [Segment].
+#[cfg(feature = "prove")]
 pub struct PreflightResults {
     pub(crate) inner: risc0_circuit_rv32im::prove::PreflightResults,
 
-    pub(crate) terminate_state: Option<TerminateState>,
+    pub(crate) terminate_state: Option<risc0_circuit_rv32im::TerminateState>,
     pub(crate) output: Option<Output>,
     pub(crate) segment_index: u32,
 }
 
+#[cfg(feature = "prove")]
 impl PreflightResults {
     /// The index of the [Segment] this [PreflightResults] came from.
     pub fn segment_index(&self) -> u32 {
@@ -356,6 +358,7 @@ impl SegmentRef for NullSegmentRef {
     }
 }
 
+#[cfg(feature = "prove")]
 pub fn null_callback(_: Segment) -> Result<Box<dyn SegmentRef>> {
     Ok(Box::new(NullSegmentRef))
 }

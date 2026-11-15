@@ -182,33 +182,39 @@ getrandom = ["risc0-zkvm-platform/getrandom"]
 # memory. This will use a slower linked-list heap allocator to reclaim memory.
 heap-embedded-alloc = ["risc0-zkvm-platform/heap-embedded-alloc"]
 metal = ["prove"]
-prove = [
+# The executor (`ExecutorImpl`, `Session`) without the prover: no circuit kernels to build.
+execute = [
   "client",
   "dep:addr2line",
   "dep:bincode",
   "dep:elf",
   "dep:gdbstub",
-  "dep:gdbstub_arch",
   "dep:gimli",
   "dep:keccak",
   "dep:lazy-regex",
   "dep:enum-map",
-  "dep:num-bigint",
-  "dep:num-traits",
   "dep:object",
   "dep:prost",
   "dep:rand",
-  "dep:rayon",
   "dep:rustc-demangle",
   "dep:tempfile",
+  "risc0-circuit-keccak/std",
+  "risc0-circuit-rv32im/execute",
+  "risc0-core/perf",
+  "std",
+]
+prove = [
+  "execute",
+  "dep:gdbstub_arch",
+  "dep:num-bigint",
+  "dep:num-traits",
+  "dep:rayon",
   "dep:typetag",
   "risc0-circuit-keccak/prove",
   "risc0-circuit-recursion/prove",
   "risc0-circuit-rv32im/prove",
-  "risc0-core/perf",
   "risc0-groth16/prove",
   "risc0-zkp/prove",
-  "std",
 ]
 redis = ["dep:redis"]
 std = [
