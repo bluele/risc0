@@ -467,6 +467,208 @@ pub(crate) mod poseidon2 {
     }
 }
 
+/// Kernels that make one sha2 ecall.
+#[cfg(test)]
+pub(crate) mod sha2 {
+    use risc0_zkp::core::{
+        digest::{Digest, DIGEST_WORDS},
+        hash::sha::{Impl, Sha256 as _, BLOCK_WORDS, SHA256_INIT},
+    };
+
+    use super::*;
+
+    pub(crate) const STATE_IN: u32 = 0x0020_0000;
+    pub(crate) const STATE_OUT: u32 = 0x0020_0100;
+    pub(crate) const DATA: u32 = 0x0030_0000;
+    pub(crate) const K: u32 = 0x0040_0000;
+    /// Words of kernel memory that nothing else in these programs touches.
+    pub(crate) const KERNEL_MEMORY: u32 = KERNEL_START_ADDR.0 + 0x0010_0000;
+    /// The last words of memory that hold a state.
+    pub(crate) const LAST_WORDS: u32 = 0u32.wrapping_sub((DIGEST_WORDS * WORD_SIZE) as u32);
+
+    const ROUND_CONSTANTS: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    /// The registers of a call: the state that it begins with, where its state goes, its
+    /// blocks, their number, and the round constants.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Call {
+        pub state_in: u32,
+        pub state_out: u32,
+        pub data: u32,
+        pub count: u32,
+        pub k: u32,
+    }
+
+    impl Default for Call {
+        fn default() -> Self {
+            Self {
+                state_in: STATE_IN,
+                state_out: STATE_OUT,
+                data: DATA,
+                count: 1,
+                k: K,
+            }
+        }
+    }
+
+    impl Call {
+        /// A kernel with the initial state of SHA-256 at `STATE_IN`, two blocks at `DATA` and
+        /// the round constants at `K`. After the call it requires, where the state goes, the
+        /// state that the compression function gives for the words that the call names.
+        pub(crate) fn program(&self) -> Program {
+            let mut memory = BTreeMap::new();
+            for (i, word) in (0u32..).zip(SHA256_INIT.as_words()) {
+                memory.insert(STATE_IN + i * WORD_SIZE as u32, *word);
+            }
+            for i in 0..2 * BLOCK_WORDS as u32 {
+                memory.insert(DATA + i * WORD_SIZE as u32, 0x0101_0101 * (i + 1));
+            }
+            for (i, word) in (0u32..).zip(ROUND_CONSTANTS) {
+                memory.insert(K + i * WORD_SIZE as u32, word);
+            }
+
+            // The state that the call leaves.
+            let word = |addr: u32| memory.get(&addr).copied().unwrap_or(0);
+            let digest = |addr: u32| -> Digest {
+                Digest::new(core::array::from_fn(|i| {
+                    word(addr + (i * WORD_SIZE) as u32)
+                }))
+            };
+            let mut state = digest(self.state_in);
+            for block in 0..self.count {
+                let block = self.data + block * (BLOCK_WORDS * WORD_SIZE) as u32;
+                let halves = [block, block + (DIGEST_WORDS * WORD_SIZE) as u32].map(digest);
+                state = *Impl::compress(&state, &halves[0], &halves[1]);
+            }
+
+            let mut asm = Assembler::new();
+            for (addr, word) in &memory {
+                asm.word(*addr, *word);
+            }
+            asm.li(REG_A7, HOST_ECALL_SHA2);
+            asm.li(REG_A0, self.state_in);
+            asm.li(REG_A1, self.state_out);
+            asm.li(REG_A2, self.data);
+            asm.li(REG_A3, self.count);
+            asm.li(REG_A4, self.k);
+            asm.ecall();
+            for (i, word) in (0u32..).zip(state.as_words()) {
+                asm.li(REG_T4, self.state_out.wrapping_add(i * WORD_SIZE as u32));
+                asm.lw(REG_T5, REG_T4, 0);
+                asm.li(REG_T6, *word);
+                asm.beq(REG_T5, REG_T6, 8);
+                asm.die();
+            }
+            asm.host_terminate(0, 0);
+            asm.program()
+        }
+    }
+
+    /// Calls that the circuit proves.
+    pub(crate) fn accepted() -> Vec<(&'static str, Call)> {
+        let call = Call::default();
+        vec![
+            ("one block", call),
+            ("no block", Call { count: 0, ..call }),
+            ("two blocks", Call { count: 2, ..call }),
+            (
+                "the state goes where it comes from",
+                Call {
+                    state_out: STATE_IN,
+                    ..call
+                },
+            ),
+            // A kernel makes the call, and its addresses are not held to user memory.
+            (
+                "the state goes to kernel memory",
+                Call {
+                    state_out: KERNEL_MEMORY,
+                    ..call
+                },
+            ),
+            (
+                "the state goes to registers of the machine",
+                Call {
+                    state_out: machine_reg(REG_S2),
+                    ..call
+                },
+            ),
+            // The cycles after the first do not read the registers again.
+            (
+                "the state goes to the registers of the call",
+                Call {
+                    state_out: machine_reg(REG_A0),
+                    ..call
+                },
+            ),
+            (
+                "the state goes to the last words of memory",
+                Call {
+                    state_out: LAST_WORDS,
+                    ..call
+                },
+            ),
+        ]
+    }
+
+    /// Calls that the executor refuses, and what it says of each.
+    pub(crate) fn refused() -> Vec<(&'static str, Call, &'static str)> {
+        const UNALIGNED: &str = "is an unaligned address";
+        let call = Call::default();
+        vec![
+            (
+                "the state comes from an address that is not word aligned",
+                Call {
+                    state_in: STATE_IN + 1,
+                    ..call
+                },
+                UNALIGNED,
+            ),
+            (
+                "the state goes to an address that is not word aligned",
+                Call {
+                    state_out: STATE_OUT + 2,
+                    ..call
+                },
+                UNALIGNED,
+            ),
+            (
+                "the blocks are not word aligned",
+                Call {
+                    data: DATA + 3,
+                    ..call
+                },
+                UNALIGNED,
+            ),
+            (
+                "the round constants are not word aligned",
+                Call { k: K + 1, ..call },
+                UNALIGNED,
+            ),
+            // Memory has no word past its end, which upstream refuses too.
+            (
+                "the state goes past the end of memory",
+                Call {
+                    state_out: LAST_WORDS + (DIGEST_WORDS / 2 * WORD_SIZE) as u32,
+                    ..call
+                },
+                "Invalid store address",
+            ),
+        ]
+    }
+}
+
 /// Kernels that make one bigint ecall, and the blobs they make it with.
 #[cfg(test)]
 pub(crate) mod bigint {

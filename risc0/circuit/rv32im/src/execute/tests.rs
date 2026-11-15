@@ -140,3 +140,15 @@ fn jalr() {
         refuses(&low.to_string(), kernel, "InstructionMisaligned");
     }
 }
+
+/// The circuit reads the four addresses of the sha2 ecall as addresses of words. Each kernel
+/// checks the state that its call leaves before it terminates.
+#[test]
+fn sha2() {
+    for (name, call) in testutil::sha2::accepted() {
+        terminates(name, MemoryImage::new_kernel(call.program()));
+    }
+    for (name, call, message) in testutil::sha2::refused() {
+        refuses(name, MemoryImage::new_kernel(call.program()), message);
+    }
+}

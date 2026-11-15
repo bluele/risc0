@@ -184,3 +184,10 @@ fn bigint() {
         proves_image(name, MemoryImage::new_kernel(call.program()));
     }
 }
+
+#[test]
+fn sha2() {
+    for (name, call) in testutil::sha2::accepted() {
+        proves_image(name, MemoryImage::new_kernel(call.program()));
+    }
+}

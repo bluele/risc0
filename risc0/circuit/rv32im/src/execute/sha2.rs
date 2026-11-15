@@ -18,7 +18,7 @@ use risc0_zkp::core::hash::sha::BLOCK_WORDS;
 
 use crate::execute::{
     platform::*,
-    r0vm::{guest_addr, LoadOp, Risc0Context},
+    r0vm::{check_aligned_addr, guest_addr, LoadOp, Risc0Context},
 };
 
 const SHA2_LOAD_STATE_CYCLES: u32 = 4;
@@ -55,12 +55,20 @@ impl Sha2State {
     }
 }
 
+/// Reads a register as the address of a word.
+///
+/// The circuit reads it with `ReadAddr`, which divides the register by 4 in the field: a register
+/// that is not a multiple of 4 names no word there.
+fn word_addr(ctx: &mut impl Risc0Context, reg: usize) -> Result<WordAddr> {
+    check_aligned_addr(guest_addr(ctx.load_machine_register(LoadOp::Record, reg)?)?)
+}
+
 pub fn ecall(ctx: &mut impl Risc0Context) -> Result<()> {
-    let state_in_addr = guest_addr(ctx.load_machine_register(LoadOp::Record, REG_A0)?)?.waddr();
-    let state_out_addr = guest_addr(ctx.load_machine_register(LoadOp::Record, REG_A1)?)?.waddr();
-    let data_addr = guest_addr(ctx.load_machine_register(LoadOp::Record, REG_A2)?)?.waddr();
+    let state_in_addr = word_addr(ctx, REG_A0)?;
+    let state_out_addr = word_addr(ctx, REG_A1)?;
+    let data_addr = word_addr(ctx, REG_A2)?;
     let count = ctx.load_machine_register(LoadOp::Record, REG_A3)? & 0xffff;
-    let k_addr = guest_addr(ctx.load_machine_register(LoadOp::Record, REG_A4)?)?.waddr();
+    let k_addr = word_addr(ctx, REG_A4)?;
     tracing::trace!("sha2: {count} blocks");
 
     if count > MAX_SHA_COUNT {

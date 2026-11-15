@@ -372,7 +372,7 @@ impl Risc0Context for TestRisc0Context {
     }
 }
 
-fn check_aligned_addr(addr: ByteAddr) -> Result<WordAddr> {
+pub(crate) fn check_aligned_addr(addr: ByteAddr) -> Result<WordAddr> {
     addr.waddr_aligned()
         .ok_or_else(|| anyhow!("{addr:?} is an unaligned address"))
 }
