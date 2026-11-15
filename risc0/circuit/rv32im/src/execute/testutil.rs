@@ -1902,4 +1902,226 @@ pub(crate) mod bigint {
         )
         .collect()
     }
+
+    /// Four ends of a program, as the 16 bytes that a write puts over four instructions.
+    fn ends() -> u128 {
+        (0..4).fold(0, |value, i| value | (u128::from(end()) << (32 * i)))
+    }
+
+    /// The instructions of the short programs. Each operation on the polynomials comes with a
+    /// read of `a1`, of `a3` and of `a4` and with a write of `a4`, an `AddTotal` with the
+    /// coefficients 1 and -1. Each operation that a `Check` has comes with a `Check`. The last
+    /// is a write of `a5`.
+    pub(crate) fn short_instructions() -> Vec<u32> {
+        let mut insns = vec![];
+        for poly_op in RESET..=EQ_ZERO {
+            let coeffs: &[i32] = if poly_op == ADD_TOTAL { &[1, -1] } else { &[0] };
+            for &coeff in coeffs {
+                for reg in [REG_A1, REG_A3, REG_A4] {
+                    insns.push(insn(poly_op, READ, coeff, reg, 0));
+                }
+                insns.push(insn(poly_op, WRITE, coeff, REG_A4, 0));
+            }
+        }
+        for poly_op in [RESET, SHIFT, CARRY1, CARRY2, EQ_ZERO] {
+            insns.push(insn(poly_op, CHECK, 0, REG_ZERO, 0));
+        }
+        insns.push(insn(SET_TERM, WRITE, 0, REG_A5, 0));
+        insns
+    }
+
+    /// The programs of a number of [short_instructions] that end with their last instruction
+    /// and not before it. A reset ends a program unless it is the first instruction, so the
+    /// last instruction is a reset, and no instruction between the first and the last is one.
+    /// A program of one instruction does not end.
+    pub(crate) struct Short {
+        len: u32,
+        first: Vec<u32>,
+        between: Vec<u32>,
+        last: Vec<u32>,
+    }
+
+    impl Short {
+        pub(crate) fn new(len: u32) -> Self {
+            let first = short_instructions();
+            let (last, between): (Vec<u32>, Vec<u32>) =
+                first.iter().partition(|insn| (**insn >> 24) & 0xf == RESET);
+            Self {
+                len,
+                first,
+                between,
+                last,
+            }
+        }
+
+        pub(crate) fn count(&self) -> u64 {
+            let [first, between, last] =
+                [&self.first, &self.between, &self.last].map(|insns| insns.len() as u64);
+            match self.len {
+                0 => 0,
+                1 => first,
+                len => first * between.pow(len - 2) * last,
+            }
+        }
+
+        pub(crate) fn program(&self, mut index: u64) -> Vec<u32> {
+            let mut digit = |insns: &[u32]| {
+                let insn = insns[(index % insns.len() as u64) as usize];
+                index /= insns.len() as u64;
+                insn
+            };
+            let mut program = vec![digit(&self.first)];
+            for _ in 2..self.len {
+                program.push(digit(&self.between));
+            }
+            if self.len > 1 {
+                program.push(digit(&self.last));
+            }
+            program
+        }
+    }
+
+    /// How many of the programs of one instruction, of two and so on the executor accepts.
+    pub(crate) const SHORT_ACCEPTED: [usize; 4] = [0, 180, 5340, 154260];
+
+    /// A call of a program of [short_instructions] with the `block`th blob of a [batch]. The
+    /// block holds what the program names after the blob: the number 1 for `a1`, zeros for
+    /// `a3`, and zeros for `a4`, where the host stores 1. `a5` points to the program, where the
+    /// host stores four ends of a program.
+    pub(crate) fn short(verify: &[u32], block: u32) -> Call {
+        const OPERANDS: u32 = 0xc0;
+        let blob = Blob {
+            stores: vec![(REG_A4, 0, 1), (REG_A5, 0, ends())],
+            verify: verify.to_vec(),
+            ..Default::default()
+        }
+        .words();
+        assert!(blob.len() * WORD_SIZE <= OPERANDS as usize);
+        let base = BLOB + block * BLOCK;
+        let program = base + (4 + blob[0]) * WORD_SIZE as u32;
+        let [one, zero, out] = [0, 16, 32].map(|at| base + OPERANDS + at);
+        Call {
+            blob,
+            mode: 0,
+            regs: vec![
+                (REG_A1, one),
+                (REG_A3, zero),
+                (REG_A4, out),
+                (REG_A5, program),
+            ],
+            memory: vec![(one, 1)],
+            expect: vec![],
+        }
+    }
+
+    /// Offsets at the ends of what the circuit adds to a register.
+    #[cfg(feature = "prove")]
+    pub(crate) const OFFSETS: [u32; 11] = [
+        0, 1, 2, 3, 4, 0x0fff, 0x1000, 0x1001, 0x1fff, 0x2000, 0xffff,
+    ];
+
+    /// One instruction for every operation on memory and on the polynomials that the encoding
+    /// has room for, the circuit having the operation or not, with every coefficient.
+    #[cfg(feature = "prove")]
+    pub(crate) fn operation_instructions() -> Vec<u32> {
+        let mut insns = vec![];
+        for mem_op in 0..16 {
+            for poly_op in 0..16 {
+                for coeff in -4..4 {
+                    insns.push(insn(poly_op, mem_op, coeff, REG_A4, 0));
+                }
+            }
+        }
+        insns
+    }
+
+    /// One instruction for each pair of operations that the circuit has, with every register
+    /// and with offsets at the ends of what the circuit adds to a register.
+    #[cfg(feature = "prove")]
+    pub(crate) fn operand_instructions() -> Vec<u32> {
+        let mut insns = vec![];
+        for mem_op in [READ, WRITE, CHECK] {
+            for poly_op in RESET..=EQ_ZERO {
+                for reg in 0..REG_MAX {
+                    for offset in OFFSETS {
+                        insns.push(insn(poly_op, mem_op, 1, reg, offset));
+                    }
+                }
+            }
+        }
+        insns
+    }
+
+    /// A call of the program of `insn` and an end, which comes `after` a read that adds 1 to
+    /// the total or as the first instruction. The registers that the ecall does not set point
+    /// to the ends of what the circuit lets a user and the machine read and write, to the
+    /// program and to the registers themselves. If the instruction writes, the host stores a
+    /// witness where it writes: four ends of a program for the program, and else 1.
+    #[cfg(feature = "prove")]
+    pub(crate) fn field(insn: u32, mode: u32, after: bool) -> Call {
+        let (mem_op, reg, offset) = (insn >> 28, (insn >> 16) as usize & 0x1f, insn & 0xffff);
+        let mut blob = Blob {
+            // A host program of the same size for every instruction.
+            stores: vec![(REG_A4, 0, 1)],
+            verify: vec![insn, end()],
+            ..Default::default()
+        };
+        if after {
+            blob.verify
+                .insert(0, self::insn(ADD_TOTAL, READ, 1, REG_A1, 0));
+        }
+        let program = BLOB + (4 + blob.words()[0]) * WORD_SIZE as u32;
+        let [one, zero, out] = [0, 16, 32].map(|at| BLOB + 0xc0 + at);
+        let regs = vec![
+            (REG_RA, 0x0000_fff0),
+            (REG_SP, 0x0001_0000),
+            (REG_GP, 0xbffe_fff0),
+            (REG_TP, 0xbffe_fff4),
+            (REG_S0, 0xbfff_0000),
+            (REG_S1, 0xbfff_fff0),
+            (REG_A1, one),
+            (REG_A2, 0x0030_0002),
+            (REG_A3, zero),
+            (REG_A4, out),
+            (REG_A5, program),
+            (REG_A6, program + 16),
+            (REG_S2, 0xc000_0000),
+            (REG_S3, 0xfffe_fff0),
+            (REG_S4, machine_reg(REG_ZERO)),
+            (REG_S5, machine_reg(REG_S5)),
+            (REG_S6, 0xffff_fff0),
+            (REG_S7, 0x0030_fff0),
+            (REG_S8, USER_REGS_ADDR.0),
+            (REG_S9, KERNEL_END_ADDR.0),
+            (REG_S10, MEPC_ADDR.0),
+            (REG_S11, 0xfeff_fff0),
+            (REG_T4, program - 16),
+            (REG_T5, SAFE_WRITE_ADDR.0),
+            (REG_T6, GLOBAL_OUTPUT_ADDR.0),
+        ];
+        if mem_op == WRITE {
+            // What the ecall sets, for a register that the list above does not have.
+            let ecall = [
+                (REG_ZERO, 0),
+                (REG_T0, mode),
+                (REG_T1, BLOB + 4 * WORD_SIZE as u32),
+                (REG_T2, program),
+                (REG_A0, BLOB),
+                (REG_A7, HOST_ECALL_BIGINT),
+            ];
+            let base = regs.iter().chain(&ecall).find(|(name, _)| *name == reg);
+            // The constants of the blob, which follow the program, for `t3`.
+            let base = base.map_or(program + 4 * blob.verify.len() as u32, |(_, base)| *base);
+            let at = base.wrapping_add(16 * offset);
+            let value = if at == program { ends() } else { 1 };
+            blob.stores = vec![(reg, offset, value)];
+        }
+        Call {
+            blob: blob.words(),
+            mode,
+            regs,
+            memory: vec![(one, 1)],
+            expect: vec![],
+        }
+    }
 }

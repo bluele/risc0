@@ -177,3 +177,28 @@ fn traps_and_returns() {
         refuses(name, image, message);
     }
 }
+
+/// No two of the short verify programs are the same. With a kernel for each program, the
+/// executor accepts as many of those of one and of two instructions as it does with the kernels
+/// of many programs that `prove::witgen::tests` runs.
+#[test]
+fn bigint_short_programs() {
+    use std::collections::BTreeSet;
+
+    use testutil::bigint::{short, Short, SHORT_ACCEPTED};
+
+    for len in 1..=3 {
+        let programs = Short::new(len as u32);
+        let all: BTreeSet<_> = (0..programs.count())
+            .map(|index| programs.program(index))
+            .collect();
+        assert_eq!(all.len() as u64, programs.count(), "{len}");
+        if len < 3 {
+            let accepts = |verify: &&Vec<u32>| {
+                testutil::run(MemoryImage::new_kernel(short(verify, 0).program())).is_ok()
+            };
+            let accepted = all.iter().filter(accepts).count();
+            assert_eq!(accepted, SHORT_ACCEPTED[len - 1], "{len}");
+        }
+    }
+}
