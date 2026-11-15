@@ -379,6 +379,11 @@ impl Assembler {
         self.addi(rd, rd, low as u32 & 0xfff);
     }
 
+    fn jalr(&mut self, rd: usize, rs1: usize, imm: u32) {
+        self.text
+            .push(insn_i(imm, rs1 as u32, 0x0, rd as u32, OP_JALR));
+    }
+
     fn host_ecall_poseidon2(
         &mut self,
         state_addr: u32,
@@ -393,6 +398,19 @@ impl Assembler {
         self.li(REG_A3, bits_count);
         self.ecall();
     }
+}
+
+/// A kernel that jumps with `jalr` to the instruction after it, with `low` added to the address
+/// in the register.
+#[cfg(test)]
+pub(crate) fn jalr(low: u32) -> Program {
+    let mut asm = Assembler::new();
+    // The entry, two words of `li` and the `jalr`.
+    let target = USER_START_ADDR.0 + (4 * WORD_SIZE) as u32;
+    asm.li(REG_T0, target + low);
+    asm.jalr(REG_RA, REG_T0, 0);
+    asm.host_terminate(0, 0);
+    asm.program()
 }
 
 /// Kernels that call the poseidon2 ecall with byte addresses, as the circuit reads them.

@@ -129,3 +129,14 @@ fn bigint() {
         refuses(name, MemoryImage::new_kernel(call.program()), message);
     }
 }
+
+/// The circuit does not clear bit 0 of the target of a `jalr`, as the ISA does. A target that is
+/// not word aligned traps, and these kernels handle no trap.
+#[test]
+fn jalr() {
+    terminates("0", MemoryImage::new_kernel(testutil::jalr(0)));
+    for low in 1..4 {
+        let kernel = MemoryImage::new_kernel(testutil::jalr(low));
+        refuses(&low.to_string(), kernel, "InstructionMisaligned");
+    }
+}

@@ -401,7 +401,9 @@ impl Emulator {
                 (pc + WORD_SIZE).0
             }
             InsnKind::JalR => {
-                new_pc = ByteAddr(rs1.wrapping_add(imm_i) & 0xfffffffe);
+                // Bit 0 stays, where the ISA clears it: the circuit takes `rs1 + imm` as the next
+                // pc (`OpJALR`). An odd target traps below, as any pc that is not word aligned.
+                new_pc = ByteAddr(rs1.wrapping_add(imm_i));
                 (pc + WORD_SIZE).0
             }
             InsnKind::Lui => decoded.imm_u(),
