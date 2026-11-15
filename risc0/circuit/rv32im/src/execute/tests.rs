@@ -164,3 +164,16 @@ fn reads_a_word_once() {
         refuses(name, image, "instruction reads a word twice");
     }
 }
+
+/// The circuit has no cycle for a trap, and requires of every instruction a pc that is word
+/// aligned.
+#[test]
+fn traps_and_returns() {
+    use testutil::{access::user_with, traps};
+
+    // A program that does not trap, under a kernel that handles every trap.
+    terminates("one ecall", user_with(traps::ecalls(), true, 0));
+    for (name, image, message) in traps::refused() {
+        refuses(name, image, message);
+    }
+}

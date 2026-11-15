@@ -14,7 +14,7 @@
 
 use std::{cmp::min, fmt::Write as _, io::Read};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use enum_map::Enum;
 use risc0_binfmt::{ByteAddr, WordAddr};
 
@@ -205,10 +205,6 @@ pub(crate) trait Risc0Context {
     }
 
     fn trap_rewind(&mut self) {
-        // default no-op
-    }
-
-    fn trap(&mut self, _cause: Exception) {
         // default no-op
     }
 
@@ -706,6 +702,13 @@ impl<T: Risc0Context> EmuContext for Risc0Machine<'_, T> {
             bail!("Illegal mret in user mode");
         }
         let dispatch_addr = guest_addr(self.load_memory(MEPC_ADDR.waddr())?)?;
+        // The circuit goes on at the word after this address, and requires of every instruction
+        // a pc that is word aligned. The emulator would run the words that an unaligned pc
+        // lies in.
+        ensure!(
+            dispatch_addr.is_aligned(),
+            "mret to an unaligned address: {dispatch_addr:?}"
+        );
         self.ctx.set_pc(dispatch_addr + WORD_SIZE);
         self.ctx.set_machine_mode(0);
         Ok(true)
@@ -726,9 +729,11 @@ impl<T: Risc0Context> EmuContext for Risc0Machine<'_, T> {
         if !dispatch_addr.is_aligned() || !is_kernel_memory(dispatch_addr) {
             bail!("Invalid trap address: {dispatch_addr:?}, cause: {cause:?}");
         }
-        self.enter_trap(dispatch_addr)?;
-        self.ctx.trap(cause);
-        Ok(false)
+        // The circuit has no cycle for a trap: it cannot prove the step from the instruction
+        // that traps to the handler that the kernel names here.
+        Err(anyhow!(
+            "Trap to a handler of the kernel: {dispatch_addr:?}, cause: {cause:?}"
+        ))
     }
 
     fn on_insn_decoded(

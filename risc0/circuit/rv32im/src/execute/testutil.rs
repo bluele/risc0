@@ -754,6 +754,108 @@ pub(crate) mod access {
     }
 }
 
+/// User programs that trap, and kernels that handle the traps or enter a user program off its
+/// words.
+#[cfg(test)]
+pub(crate) mod traps {
+    use super::{
+        access::{kernel_words, under, user, user_with, WORD},
+        *,
+    };
+
+    /// A user program of one ecall.
+    pub(crate) fn ecalls() -> Program {
+        let mut asm = Assembler::new();
+        asm.ecall();
+        asm.program()
+    }
+
+    /// A user program that does what traps, in the order of the names in [refused].
+    pub(crate) fn traps(cause: u32) -> Program {
+        let mut asm = Assembler::new();
+        match cause {
+            0 => {
+                let target = asm.here() + (3 * WORD_SIZE) as u32 + 2;
+                asm.li2(REG_T0, target);
+                asm.jalr(REG_RA, REG_T0, 0);
+            }
+            1 => {
+                asm.li2(REG_T0, KERNEL_START_ADDR.0 + 0x1000);
+                asm.jalr(REG_RA, REG_T0, 0);
+            }
+            2 => asm.raw(0xffff_ffff),
+            3 => asm.raw(0x0010_0073),
+            4 => {
+                asm.li2(REG_T0, asm.here() + 2);
+                asm.load(WORD, REG_A0, REG_T0, 0);
+            }
+            5 => {
+                asm.li2(REG_T0, KERNEL_START_ADDR.0);
+                asm.load(WORD, REG_A0, REG_T0, 0);
+            }
+            6 => {
+                asm.li2(REG_T0, 0x0020_0002);
+                asm.store(WORD, REG_T0, REG_T0, 0);
+            }
+            7 => {
+                asm.li2(REG_T0, KERNEL_START_ADDR.0);
+                asm.store(WORD, REG_T0, REG_T0, 0);
+            }
+            _ => unimplemented!(),
+        }
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// User programs that the executor refuses, and what it says of each. The circuit cannot
+    /// prove the step from a trap to its handler, nor an instruction at a pc that is not word
+    /// aligned.
+    pub(crate) fn refused() -> Vec<(&'static str, MemoryImage, &'static str)> {
+        const HANDLED: &str = "Trap to a handler of the kernel";
+        let names = [
+            "a jump to an address that is not word aligned",
+            "a jump into kernel memory",
+            "a word that is no instruction",
+            "ebreak",
+            "a load of a word from an address that is not word aligned",
+            "a load from kernel memory",
+            "a store of a word to an address that is not word aligned",
+            "a store to kernel memory",
+        ];
+        // The executor does not take a handler in user memory for the handler of an ecall.
+        let mut kernel = kernel_words(true, 0);
+        kernel.insert(ECALL_DISPATCH_ADDR.0, USER_START_ADDR.0 + WORD_SIZE as u32);
+        let mut programs: Vec<_> = (0u32..)
+            .zip(names)
+            .map(|(cause, name)| (name, user_with(traps(cause), true, 0), HANDLED))
+            .collect();
+        programs.extend([
+            (
+                "an ecall whose handler is in user memory",
+                under(ecalls(), kernel),
+                HANDLED,
+            ),
+            // Nothing handles the trap, which upstream refuses too.
+            (
+                "a word that is no instruction, under a kernel without a handler",
+                user(traps(2)),
+                "Invalid trap address",
+            ),
+            (
+                "entered two bytes past its entry",
+                user_with(ecalls(), true, 2),
+                "mret to an unaligned address",
+            ),
+            (
+                "entered one byte past its entry",
+                user_with(ecalls(), true, 1),
+                "mret to an unaligned address",
+            ),
+        ]);
+        programs
+    }
+}
+
 /// Kernels that make one sha2 ecall.
 #[cfg(test)]
 pub(crate) mod sha2 {
