@@ -582,6 +582,10 @@ impl<'a, C: Risc0Context> Risc0Machine<'a, C> {
             EcallKind::Write,
         )?;
         let fd = self.load_register(REG_A0)?;
+        // The circuit requires the descriptor to fit in 16 bits.
+        if fd >> 16 != 0 {
+            bail!("Invalid descriptor in host write: {fd}");
+        }
         let ptr = ByteAddr(self.load_register(REG_A1)?);
         let len = self.load_register(REG_A2)?;
         if ptr + len < ptr {

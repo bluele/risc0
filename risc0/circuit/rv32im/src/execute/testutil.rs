@@ -843,6 +843,54 @@ pub(crate) mod reserved {
     }
 }
 
+/// A kernel that writes with the host ecall, and a host that takes every write.
+#[cfg(test)]
+pub(crate) mod host_write {
+    use super::*;
+
+    /// Takes every write.
+    pub(crate) struct Writes;
+
+    impl Syscall for Writes {
+        fn host_read(
+            &self,
+            _ctx: &mut impl SyscallContext,
+            _fd: u32,
+            _buf: &mut [u8],
+        ) -> Result<u32> {
+            unimplemented!()
+        }
+
+        fn host_write(&self, _ctx: &mut impl SyscallContext, _fd: u32, buf: &[u8]) -> Result<u32> {
+            Ok(buf.len() as u32)
+        }
+    }
+
+    /// A kernel that writes four bytes of itself to `fd`, then terminates.
+    pub(crate) fn kernel(fd: u32) -> Program {
+        let mut asm = Assembler::new();
+        asm.li(REG_A7, HOST_ECALL_WRITE);
+        asm.li(REG_A0, fd);
+        asm.li(REG_A1, USER_START_ADDR.0);
+        asm.li(REG_A2, WORD_SIZE as u32);
+        asm.ecall();
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// Runs `image` as [super::run] does, with [Writes] as the host.
+    pub(crate) fn run(image: MemoryImage) -> Result<SimpleSession> {
+        execute(
+            image,
+            super::super::DEFAULT_SEGMENT_LIMIT_PO2,
+            crate::MAX_INSN_CYCLES,
+            DEFAULT_SESSION_LIMIT,
+            &Writes,
+            None,
+        )
+    }
+}
+
 /// User programs that trap, and kernels that handle the traps or enter a user program off its
 /// words.
 #[cfg(test)]

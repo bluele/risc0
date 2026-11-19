@@ -177,6 +177,27 @@ fn reserved_encodings() {
     }
 }
 
+/// The circuit requires the descriptor of a host write to fit in 16 bits.
+#[test]
+fn host_write() {
+    use testutil::host_write::{kernel, run};
+
+    let session = run(MemoryImage::new_kernel(kernel(1))).unwrap();
+    assert_eq!(
+        session.segments[0].claim.terminate_state,
+        Some(TerminateState::default())
+    );
+    for fd in [0x1_0000, u32::MAX] {
+        let Err(error) = run(MemoryImage::new_kernel(kernel(fd))) else {
+            panic!("the executor took a write to {fd:#x}");
+        };
+        assert!(
+            format!("{error:#}").contains("Invalid descriptor"),
+            "{error:#}"
+        );
+    }
+}
+
 /// The circuit has no cycle for a trap, and requires of every instruction a pc that is word
 /// aligned.
 #[test]
