@@ -284,11 +284,16 @@ impl Emulator {
             (0b1100011, 0b111, _) => self.step_compute(ctx, InsnKind::BgeU, decoded),
             // J-format jal
             (0b1101111, _, _) => self.step_compute(ctx, InsnKind::Jal, decoded),
-            // I-format jalr
-            (0b1100111, _, _) => self.step_compute(ctx, InsnKind::JalR, decoded),
-            // System instruction
-            (0b1110011, 0b000, 0b0011000) => self.step_system(ctx, InsnKind::Mret, decoded),
-            (0b1110011, 0b000, 0b0000000) => self.step_system(ctx, InsnKind::Eany, decoded),
+            // I-format jalr, whose funct3 the circuit requires to be zero
+            (0b1100111, 0b000, _) => self.step_compute(ctx, InsnKind::JalR, decoded),
+            // System instruction. The circuit takes an mret and an ecall only as their whole
+            // words, whose other fields are zero; the ISA reserves the other encodings.
+            (0b1110011, 0b000, 0b0011000) if decoded.insn == 0x3020_0073 => {
+                self.step_system(ctx, InsnKind::Mret, decoded)
+            }
+            (0b1110011, 0b000, 0b0000000) if decoded.rs1 == 0 && decoded.rd == 0 => {
+                self.step_system(ctx, InsnKind::Eany, decoded)
+            }
             _ => Ok(ctx
                 .trap(Exception::IllegalInstruction(decoded.insn, line!()))?
                 .then_some(InsnKind::Invalid)),

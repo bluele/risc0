@@ -165,6 +165,18 @@ fn reads_a_word_once() {
     }
 }
 
+/// The circuit takes a `jalr` only with funct3 zero, and an `ecall` and an `mret` only as their
+/// whole words.
+#[test]
+fn reserved_encodings() {
+    for (name, image) in testutil::reserved::accepted() {
+        terminates(&name, image);
+    }
+    for (name, image) in testutil::reserved::refused() {
+        refuses(&name, image, "IllegalInstruction");
+    }
+}
+
 /// The circuit has no cycle for a trap, and requires of every instruction a pc that is word
 /// aligned.
 #[test]

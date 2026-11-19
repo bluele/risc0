@@ -754,6 +754,95 @@ pub(crate) mod access {
     }
 }
 
+/// Words of `jalr`, `ecall` and `mret` that the circuit does not take, as the ISA reserves them:
+/// a `jalr` whose funct3 is not zero, and an `ecall` or an `mret` with another field that is not
+/// zero.
+#[cfg(test)]
+pub(crate) mod reserved {
+    use super::{access::user, *};
+
+    const ECALL: u32 = 0x0000_0073;
+    const MRET: u32 = 0x3020_0073;
+
+    /// A kernel that jumps to the instruction after a `jalr` of `funct3`.
+    fn jalr(funct3: u32) -> Program {
+        let mut asm = Assembler::new();
+        let next = asm.here() + (3 * WORD_SIZE) as u32;
+        asm.li2(REG_T0, next);
+        asm.raw(insn_i(0, REG_T0 as u32, funct3, REG_RA as u32, OP_JALR));
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// A kernel that terminates with `ecall` as the word of its ecall.
+    fn terminates_with(ecall: u32) -> Program {
+        let mut asm = Assembler::new();
+        asm.li(REG_A7, HOST_ECALL_TERMINATE);
+        asm.li(REG_A0, 0);
+        asm.li(REG_A1, 0);
+        asm.raw(ecall);
+        asm.program()
+    }
+
+    /// A kernel whose first instruction is `word`.
+    fn begins_with(word: u32) -> Program {
+        let mut asm = Assembler::new();
+        asm.raw(word);
+        asm.host_terminate(0, 0);
+        asm.program()
+    }
+
+    /// A user program of one ecall, of the word `ecall`.
+    fn user_ecall(ecall: u32) -> Program {
+        let mut asm = Assembler::new();
+        asm.raw(ecall);
+        asm.program()
+    }
+
+    /// The canonical words, which the executor runs.
+    pub(crate) fn accepted() -> Vec<(String, MemoryImage)> {
+        vec![
+            (
+                "a jalr of funct3 0".into(),
+                MemoryImage::new_kernel(jalr(0)),
+            ),
+            (
+                "an ecall".into(),
+                MemoryImage::new_kernel(terminates_with(ECALL)),
+            ),
+            // The kernel of the user program enters it with an mret.
+            ("a user ecall".into(), user(user_ecall(ECALL))),
+        ]
+    }
+
+    /// The reserved words, which the executor refuses as illegal instructions.
+    pub(crate) fn refused() -> Vec<(String, MemoryImage)> {
+        let mut images = Vec::new();
+        for funct3 in 1..8 {
+            let image = MemoryImage::new_kernel(jalr(funct3));
+            images.push((format!("a jalr of funct3 {funct3}"), image));
+        }
+        let ecall = |rs1: u32, rd: u32| insn_i(0, rs1, 0, rd, OP_ENV);
+        for (rs1, rd) in [(0, 1), (0, 16), (0, 31), (1, 0), (31, 0), (1, 1)] {
+            let word = ecall(rs1, rd);
+            let image = MemoryImage::new_kernel(terminates_with(word));
+            images.push((format!("an ecall {word:#010x}"), image));
+            images.push((format!("a user ecall {word:#010x}"), user(user_ecall(word))));
+        }
+        // The rd, rs1 and rs2 fields of an mret.
+        for word in [
+            MRET | (1 << 7),
+            MRET | (1 << 15),
+            MRET & !(0x1f << 20),
+            MRET | (1 << 20),
+        ] {
+            let image = MemoryImage::new_kernel(begins_with(word));
+            images.push((format!("an mret {word:#010x}"), image));
+        }
+        images
+    }
+}
+
 /// User programs that trap, and kernels that handle the traps or enter a user program off its
 /// words.
 #[cfg(test)]
