@@ -5,7 +5,7 @@ on:
   pull_request:
     branches: [main, "release-*"]
   push:
-    branches: ["bluele/**"]
+    branches: ["zkvm-tee/**"]
   workflow_dispatch:
 
 concurrency:
